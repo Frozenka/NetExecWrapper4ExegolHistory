@@ -14,7 +14,7 @@ try:
     from exegol_sync import (
         check_exegol_available, get_existing_creds, get_existing_hosts,
         add_cred_to_exegol, add_host_to_exegol, sync_summary,
-        clean_string, extract_ntlm_hash
+        clean_string, extract_ntlm_hash, PYTHON, EXEGOL
     )
 except ImportError:
     # Fallback si le module n'est pas disponible
@@ -106,14 +106,16 @@ def detect_workspace_from_args(args):
     return workspace
 
 def get_all_workspaces():
-    """Récupère la liste de tous les workspaces disponibles."""
+    """Récupère la liste de tous les workspaces disponibles (sans doublon)."""
+    seen = {"default"}
     workspaces = ["default"]
     workspaces_dir = "/root/.nxc/workspaces"
     if os.path.exists(workspaces_dir):
         try:
             for item in os.listdir(workspaces_dir):
                 item_path = os.path.join(workspaces_dir, item)
-                if os.path.isdir(item_path):
+                if os.path.isdir(item_path) and item not in seen:
+                    seen.add(item)
                     workspaces.append(item)
         except Exception:
             pass
@@ -174,76 +176,78 @@ added_hosts = []
 if cli_user and (cli_pass or cli_hash):
     if add_cred_to_exegol(cli_user, password=cli_pass, hash_val=cli_hash, domain=cli_domain, existing_creds=existing_creds):
         user_clean = clean_string(cli_user)
-        domain_clean = clean_string(cli_domain) if cli_domain else ""
         if cli_hash:
             secret_clean = extract_ntlm_hash(cli_hash)
         else:
             secret_clean = clean_string(cli_pass)
-        added_creds.append((user_clean, secret_clean, domain_clean))
-        existing_creds.add((user_clean, secret_clean, domain_clean))
+        added_creds.append((user_clean, secret_clean))
+        existing_creds.add((user_clean, secret_clean))
 
-# Détection du protocole et du workspace
-protocol = get_protocol_from_args(nxc_args)
-workspace = detect_workspace_from_args(nxc_args)
+# --- Logique identique au script d'origine : une seule DB (default/smb.db), clé (user, secret) ---
+try:
+    conn = sqlite3.connect(NXC_DB)
+    cursor = conn.cursor()
 
-# Si le workspace spécifié n'existe pas, essayer tous les workspaces disponibles
-workspaces_to_check = [workspace]
-if not os.path.exists(f"/root/.nxc/workspaces/{workspace}"):
-    workspaces_to_check = get_all_workspaces()
+    cursor.execute("SELECT username, password, credtype, domain FROM users WHERE password IS NOT NULL")
+    rows = cursor.fetchall()
 
-# Traitement de toutes les bases de données disponibles dans tous les workspaces
-for workspace_to_check in workspaces_to_check:
-    for proto, db_name in PROTOCOL_DBS.items():
-        db_path = get_db_path(proto, workspace_to_check)
-        
-        if not os.path.exists(db_path):
+    for username, pwd, credtype, domain in rows:
+        if not username or not pwd or username.endswith('$'):
             continue
-        
+
+        username_clean = clean_string(username)
+        domain_clean = domain.replace('\x00', '').strip() if domain else ''
+        domain_clean = clean_string(domain_clean) if domain_clean else ""
+
+        if credtype == "hash":
+            pwd_clean = extract_ntlm_hash(pwd)
+        else:
+            pwd_clean = clean_string(pwd)
+
+        key = (username_clean, pwd_clean)
+
+        if key in existing_creds:
+            continue
+
+        base_cmd = [PYTHON, EXEGOL, "add", "creds", "-u", username]
+        if domain_clean:
+            base_cmd += ["-d", domain_clean]
+        if credtype == "hash":
+            cmd = base_cmd + ["-H", pwd_clean]
+        else:
+            cmd = base_cmd + ["-p", pwd_clean]
+
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                added_creds.append(key)
+                existing_creds.add(key)
+            elif r.stderr:
+                print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {r.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            print(Fore.YELLOW + f"[!] Timeout adding credential for {username}")
 
-            # Récupération des identifiants
-            cursor.execute("SELECT username, password, credtype, domain FROM users WHERE password IS NOT NULL")
-            rows = cursor.fetchall()
+    cursor.execute("SELECT DISTINCT ip, hostname FROM hosts WHERE ip IS NOT NULL")
+    ips = cursor.fetchall()
+    for ip, hostname in ips:
+        if ip and ip not in existing_hosts:
+            cmd = [PYTHON, EXEGOL, "add", "hosts", "--ip", ip]
+            if hostname and hostname.strip():
+                cmd += ["-n", hostname.strip()]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                added_hosts.append(ip)
+                existing_hosts.add(ip)
+            except subprocess.CalledProcessError:
+                pass
+            except subprocess.TimeoutExpired:
+                print(Fore.YELLOW + f"[!] Timeout adding host {ip}")
 
-            for username, pwd, credtype, domain in rows:
-                if not username or not pwd or username.endswith('$'):
-                    continue
-
-                username_clean = clean_string(username)
-                domain_clean = domain.replace('\x00', '').strip() if domain else ''
-                domain_clean = clean_string(domain_clean) if domain_clean else ""
-
-                if credtype == "hash":
-                    pwd_clean = extract_ntlm_hash(pwd)
-                else:
-                    pwd_clean = clean_string(pwd)
-
-                key = (username_clean, pwd_clean, domain_clean)
-
-                if key in existing_creds:
-                    continue
-
-                if add_cred_to_exegol(username, password=pwd_clean if credtype != "hash" else None, 
-                                    hash_val=pwd_clean if credtype == "hash" else None, 
-                                    domain=domain_clean, existing_creds=existing_creds):
-                    added_creds.append(key)
-                    existing_creds.add(key)
-
-            # Récupération des hôtes
-            cursor.execute("SELECT DISTINCT ip, hostname FROM hosts WHERE ip IS NOT NULL")
-            ips = cursor.fetchall()
-            for ip, hostname in ips:
-                if add_host_to_exegol(ip, hostname=hostname, existing_hosts=existing_hosts):
-                    added_hosts.append(ip)
-                    existing_hosts.add(ip)
-
-            conn.close()
-        except sqlite3.Error as e:
-            print(Fore.YELLOW + f"[!] SQLite error for {db_path}: {e}")
-        except Exception as e:
-            print(Fore.YELLOW + f"[!] Error processing {db_path}: {e}")
+    conn.close()
+except sqlite3.Error as e:
+    print(Fore.YELLOW + f"[!] DB error: {e}")
+except Exception as e:
+    print(Fore.YELLOW + f"[!] Error: {e}")
 
 # Affichage du résumé
 sync_summary(added_creds, added_hosts)

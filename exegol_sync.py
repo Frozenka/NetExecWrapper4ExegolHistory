@@ -54,7 +54,8 @@ def get_existing_creds():
             else:
                 secret = clean_string(password)
             if username and secret:
-                existing_creds.add((username, secret, domain))
+                # Clé en 2-tuple (user, secret) comme le script d'origine pour dédup
+                existing_creds.add((username, secret))
     except subprocess.TimeoutExpired:
         print(Fore.YELLOW + "[!] Timeout while exporting credentials from Exegol-History")
     except subprocess.CalledProcessError as e:
@@ -104,7 +105,8 @@ def add_cred_to_exegol(username, password=None, hash_val=None, domain=None, exis
     else:
         return False
     
-    key = (username_clean, secret_clean, domain_clean)
+    # Clé en 2-tuple (user, secret) comme le script d'origine
+    key = (username_clean, secret_clean)
     
     if key in existing_creds:
         return False
@@ -116,14 +118,21 @@ def add_cred_to_exegol(username, password=None, hash_val=None, domain=None, exis
         if hash_val:
             cmd += ["-H", secret_clean]
         else:
+            # Utiliser le mot de passe original (pas lowercasé) pour Exegol
             cmd += ["-p", password]
         
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            if result.stderr:
+                print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {result.stderr.strip()}")
+            return False
         return True
     except subprocess.TimeoutExpired:
         print(Fore.YELLOW + f"[!] Timeout while adding credential for {username}")
         return False
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        if e.stderr:
+            print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {e.stderr.strip()}")
         return False
 
 def add_host_to_exegol(ip, hostname=None, existing_hosts=None):
