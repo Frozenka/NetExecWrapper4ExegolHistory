@@ -16,6 +16,8 @@ fi
 ALIAS_LINE="alias nxc=\"python3 /opt/tools/NetExec/nxc/nxcwrap.py\""
 if ! grep -Fxq "$ALIAS_LINE" /root/.bashrc; then
     echo "$ALIAS_LINE" >> /root/.bashrc
+    echo "[*] Alias nxc ajouté. Faire: source ~/.bashrc (ou nouveau terminal)"
 fi
 alias disablenxcwrapper="sed -i 's/scrap *= *True/scrap = False/' /root/.nxc/nxc.conf"
 alias enablenxcwrapper="sed -i 's/scrap *= *False/scrap = True/' /root/.nxc/nxc.conf"
+echo "[*] nxc = wrapper (sync Exegol-history). Un seul fichier: nxcwrap.py"
