@@ -5,6 +5,7 @@
 import subprocess
 import json
 import os
+import tempfile
 from colorama import Fore
 
 PYTHON = "/opt/tools/Exegol-history/venv/bin/python3"
@@ -37,54 +38,100 @@ def check_exegol_available(verbose=False):
         return False
     return True
 
+def _parse_creds_json(creds_json):
+    """Parse la liste JSON des creds et retourne un set de (username_clean, secret)."""
+    out = set()
+    for cred in creds_json:
+        username = clean_string(cred.get("username", ""))
+        password = cred.get("password", "")
+        hashval = cred.get("hash", "")
+        if hashval:
+            secret = extract_ntlm_hash(hashval)
+        else:
+            secret = clean_string(password)
+        if username and secret:
+            out.add((username, secret))
+    return out
+
 def get_existing_creds():
-    """Récupère les identifiants existants depuis Exegol-History."""
+    """Récupère les identifiants existants depuis Exegol-History.
+    Compatible ancienne API (export creds → stdout JSON) et nouvelle (--format JSON -f file).
+    """
     existing_creds = set()
+    # 1) Nouvelle API : export creds --format JSON -f <fichier>
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            tmp_path = f.name
+        try:
+            export_cmd = [PYTHON, EXEGOL, "export", "creds", "--format", "JSON", "-f", tmp_path]
+            export_proc = subprocess.run(export_cmd, capture_output=True, text=True, timeout=30)
+            if export_proc.returncode == 0 and os.path.isfile(tmp_path):
+                with open(tmp_path, 'r', encoding='utf-8') as fp:
+                    creds_json = json.load(fp)
+                return _parse_creds_json(creds_json)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 2) Ancienne API (comme ton repo d'origine) : export creds → JSON sur stdout
     try:
         export_cmd = [PYTHON, EXEGOL, "export", "creds"]
-        export_proc = subprocess.run(export_cmd, capture_output=True, text=True, check=True, timeout=30)
-        creds_json = json.loads(export_proc.stdout)
-        for cred in creds_json:
-            username = clean_string(cred.get("username", ""))
-            password = cred.get("password", "")
-            hashval = cred.get("hash", "")
-            domain = clean_string(cred.get("domain", "")) if cred.get("domain") else ""
-            if hashval:
-                secret = extract_ntlm_hash(hashval)
-            else:
-                secret = clean_string(password)
-            if username and secret:
-                # Clé en 2-tuple (user, secret) comme le script d'origine pour dédup
-                existing_creds.add((username, secret))
+        export_proc = subprocess.run(export_cmd, capture_output=True, text=True, timeout=30)
+        if export_proc.returncode == 0 and export_proc.stdout.strip():
+            creds_json = json.loads(export_proc.stdout)
+            return _parse_creds_json(creds_json)
     except subprocess.TimeoutExpired:
         print(Fore.YELLOW + "[!] Timeout while exporting credentials from Exegol-History")
-    except subprocess.CalledProcessError as e:
-        print(Fore.YELLOW + f"[!] Error exporting credentials: {e}")
     except json.JSONDecodeError:
-        print(Fore.YELLOW + "[!] Invalid JSON response from Exegol-History")
+        pass
     except Exception as e:
-        print(Fore.YELLOW + f"[!] Unexpected error while exporting credentials: {e}")
+        print(Fore.YELLOW + f"[!] Error exporting credentials: {e}")
     return existing_creds
 
 def get_existing_hosts():
-    """Récupère les hôtes existants depuis Exegol-History."""
+    """Récupère les hôtes existants depuis Exegol-History.
+    Compatible ancienne API (export hosts → stdout JSON) et nouvelle (--format JSON -f file).
+    """
     existing_hosts = set()
     try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            tmp_path = f.name
+        try:
+            export_cmd = [PYTHON, EXEGOL, "export", "hosts", "--format", "JSON", "-f", tmp_path]
+            export_proc = subprocess.run(export_cmd, capture_output=True, text=True, timeout=30)
+            if export_proc.returncode == 0 and os.path.isfile(tmp_path):
+                with open(tmp_path, 'r', encoding='utf-8') as fp:
+                    hosts_json = json.load(fp)
+                for host in hosts_json:
+                    ip = host.get("ip", "")
+                    if ip:
+                        existing_hosts.add(ip)
+                return existing_hosts
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
         export_cmd = [PYTHON, EXEGOL, "export", "hosts"]
-        export_proc = subprocess.run(export_cmd, capture_output=True, text=True, check=True, timeout=30)
-        hosts_json = json.loads(export_proc.stdout)
-        for host in hosts_json:
-            ip = host.get("ip", "")
-            if ip:
-                existing_hosts.add(ip)
+        export_proc = subprocess.run(export_cmd, capture_output=True, text=True, timeout=30)
+        if export_proc.returncode == 0 and export_proc.stdout.strip():
+            hosts_json = json.loads(export_proc.stdout)
+            for host in hosts_json:
+                ip = host.get("ip", "")
+                if ip:
+                    existing_hosts.add(ip)
     except subprocess.TimeoutExpired:
         print(Fore.YELLOW + "[!] Timeout while exporting hosts from Exegol-History")
-    except subprocess.CalledProcessError as e:
-        print(Fore.YELLOW + f"[!] Error exporting hosts: {e}")
     except json.JSONDecodeError:
-        print(Fore.YELLOW + "[!] Invalid JSON response from Exegol-History")
+        pass
     except Exception as e:
-        print(Fore.YELLOW + f"[!] Unexpected error while exporting hosts: {e}")
+        print(Fore.YELLOW + f"[!] Error exporting hosts: {e}")
     return existing_hosts
 
 def add_cred_to_exegol(username, password=None, hash_val=None, domain=None, existing_creds=None):
@@ -123,16 +170,15 @@ def add_cred_to_exegol(username, password=None, hash_val=None, domain=None, exis
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
-            if result.stderr:
-                print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {result.stderr.strip()}")
+            err = (result.stderr or result.stdout or "exit code %s" % result.returncode).strip()
+            print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {err}")
             return False
         return True
     except subprocess.TimeoutExpired:
         print(Fore.YELLOW + f"[!] Timeout while adding credential for {username}")
         return False
-    except subprocess.CalledProcessError as e:
-        if e.stderr:
-            print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {e.stderr.strip()}")
+    except Exception as e:
+        print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {e}")
         return False
 
 def add_host_to_exegol(ip, hostname=None, existing_hosts=None):

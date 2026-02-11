@@ -222,8 +222,9 @@ try:
             if r.returncode == 0:
                 added_creds.append(key)
                 existing_creds.add(key)
-            elif r.stderr:
-                print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {r.stderr.strip()}")
+            else:
+                err = (r.stderr or r.stdout or "unknown error").strip()
+                print(Fore.YELLOW + f"[!] Exegol add creds failed for {username}: {err}")
         except subprocess.TimeoutExpired:
             print(Fore.YELLOW + f"[!] Timeout adding credential for {username}")
 
