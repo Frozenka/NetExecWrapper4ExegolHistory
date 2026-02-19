@@ -14,6 +14,10 @@ from colorama import Fore, init
 
 init(autoreset=True)
 
+# Réduire le bruit des sous-processus (nxc, exegol-history) qui utilisent requests/urllib3
+_env = os.environ.copy()
+_env["PYTHONWARNINGS"] = _env.get("PYTHONWARNINGS", "") or "ignore::RequestsDependencyWarning"
+
 REAL_NXC = "nxc"
 EXEGOL_SCRIPT = "/opt/tools/Exegol-history/exegol-history.py"
 
@@ -59,6 +63,12 @@ def extract_ntlm_hash(full_hash):
     parts = full_hash.split(':')
     return parts[1].lower().strip() if len(parts) == 2 else full_hash.lower().strip()
 
+def _cred_key(username, secret):
+    """Clé de dédup unique : (user_sans_domain, secret) pour éviter doublons DOMAIN\\user vs user."""
+    u = clean_string(username)
+    u = u.split("\\")[-1] if "\\" in u else u
+    return (u, secret)
+
 def is_scrap_enabled():
     try:
         config = configparser.ConfigParser()
@@ -83,7 +93,7 @@ def get_existing_creds():
                 cmd = base + ["export", "creds", "--format", "JSON", "-f", tmp]
             else:
                 cmd = base + ["export", "creds", "--format", "JSON"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_env)
             if r.returncode != 0:
                 if use_file and os.path.isfile(tmp):
                     os.unlink(tmp)
@@ -107,7 +117,7 @@ def get_existing_creds():
                 h = c.get("hash", "")
                 secret = extract_ntlm_hash(h) if h else clean_string(pwd)
                 if u and secret:
-                    out.add((u, secret))
+                    out.add(_cred_key(u, secret))
             return out
         except (json.JSONDecodeError, FileNotFoundError, subprocess.TimeoutExpired):
             pass
@@ -129,7 +139,7 @@ def get_existing_hosts():
                 cmd = base + ["export", "hosts", "--format", "JSON", "-f", tmp]
             else:
                 cmd = base + ["export", "hosts", "--format", "JSON"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_env)
             if r.returncode != 0:
                 if use_file and os.path.isfile(tmp):
                     os.unlink(tmp)
@@ -149,6 +159,7 @@ def get_existing_hosts():
                 continue
             for h in data:
                 ip = (h.get("ip", "") if isinstance(h, dict) else "") or ""
+                ip = ip.strip()
                 if ip:
                     out.add(ip)
             return out
@@ -171,7 +182,7 @@ def add_cred(username, password=None, hash_val=None, domain=None):
         cmd += ["-p", password]
     else:
         return False
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=_env)
     return r.returncode == 0
 
 def add_host(ip, hostname=None):
@@ -181,7 +192,7 @@ def add_host(ip, hostname=None):
     cmd = base + ["add", "hosts", "--ip", ip]
     if hostname and str(hostname).strip():
         cmd += ["-n", str(hostname).strip()]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=_env)
     return r.returncode == 0
 
 # --- main ---
@@ -222,7 +233,7 @@ if "-p" in nxc_args:
         pass
 
 try:
-    retcode = subprocess.call(nxc_cmd)
+    retcode = subprocess.call(nxc_cmd, env=_env)
 except Exception as e:
     print(Fore.RED + f"[!] Error running nxc: {e}")
     sys.exit(1)
@@ -239,7 +250,7 @@ added_creds = []
 added_hosts = []
 
 if cli_user and cli_pass:
-    key = (clean_string(cli_user), clean_string(cli_pass))
+    key = _cred_key(cli_user, clean_string(cli_pass))
     if key not in existing_creds and add_cred(cli_user, password=cli_pass):
         added_creds.append(key)
         existing_creds.add(key)
@@ -258,7 +269,7 @@ try:
         else:
             pwd_clean = clean_string(pwd)
             ok = add_cred(username, password=pwd, domain=domain_clean or None)
-        key = (clean_string(username), pwd_clean)
+        key = _cred_key(username, pwd_clean)
         if key in existing_creds:
             continue
         if ok:
@@ -267,11 +278,12 @@ try:
 
     cur.execute("SELECT DISTINCT ip, hostname FROM hosts WHERE ip IS NOT NULL")
     for ip, hostname in cur.fetchall():
-        if not ip or ip in existing_hosts:
+        ip_clean = (ip or "").strip()
+        if not ip_clean or ip_clean in existing_hosts:
             continue
-        if add_host(ip, hostname=hostname):
-            added_hosts.append(ip)
-            existing_hosts.add(ip)
+        if add_host(ip_clean, hostname=(hostname or "").strip() or None):
+            added_hosts.append(ip_clean)
+            existing_hosts.add(ip_clean)
 
     conn.close()
 except Exception as e:
