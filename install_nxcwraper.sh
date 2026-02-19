@@ -53,4 +53,7 @@ for f in /root/.zprofile; do
     fi
 done
 
-echo "[*] nxc = wrapper (bash + zsh). Dans CE terminal : source ~/.bashrc   ou   source ~/.zshrc"
+echo "[*] nxc = wrapper (bash + zsh)."
+echo "[*] Ouverture d'un nouveau shell pour activer l'alias..."
+# Remplacer ce processus par un nouveau shell qui charge .zshrc/.bashrc → alias actif tout de suite
+exec zsh -i 2>/dev/null || exec bash -i
